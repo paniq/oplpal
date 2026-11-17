@@ -1,5 +1,7 @@
 # OPL PAL
 
+![OPL PAL's TUI with the demo song loaded, rendered in a terminal that speaks the kitty graphics protocol](screenshot.png)
+
 A tiny tracker for a pretend Sound Blaster. Real OPL3 sound (via the bundled
 [Nuked-OPL3](https://github.com/nukeykt/Nuked-OPL3) emulator), a TUI, and a
 little animated picture in terminals that speak the kitty graphics protocol
