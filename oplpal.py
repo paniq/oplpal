@@ -446,7 +446,7 @@ def render_wav(song, path):
     with wave.open(path, "wb") as w:
         w.setnchannels(2), w.setsampwidth(2), w.setframerate(RATE)
         done, stopped = 0, False
-        while done < total + RATE * 2:
+        while done < total:
             if not stopped and done >= total:
                 eng.events.append(("stop",))
                 stopped = True
