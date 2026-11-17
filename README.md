@@ -18,6 +18,7 @@ already provides on a normal Ubuntu desktop. No pip packages.
 
     ./oplpal.py mytune.json     open/save a specific file (default: oplpal-song.json)
     ./oplpal.py --no-gfx        text only
+    ./oplpal.py --layout de     QWERTZ/AZERTY fallback for terminals other than kitty/Ghostty
     ./oplpal.py --wav out.wav   render the song to a file, no terminal needed
     OPLPAL_DEVICE=hw:0 ./oplpal.py   pick a different ALSA device
 
@@ -38,9 +39,9 @@ Press **Space**. That's it. Then press **F5** on a column for the dice.
 | `Space` | play / stop |
 | `Tab` | LOOP (repeat this pattern) <-> SONG (play A, B, C... skipping empties) |
 | `PgUp` / `PgDn` | switch pattern (A-H) |
-| `,` `.` | instrument (10 FM patches, shown on screen) |
-| `[` `]` | octave |
-| `-` `=` | tempo (shift for +/-1) |
+| `Shift`+`←` `→` | instrument (10 FM patches, shown on screen; also `,` `.`) |
+| `Shift`+`↑` `↓` | octave (also `[` `]`) |
+| `F9` `F10` | tempo (also `-` `=`; `+`/`_` for +/-1) |
 | `1` | note-off |
 | `Del` / `Backspace` | clear cell |
 | `Enter` | mute / unmute the column |
@@ -58,6 +59,23 @@ stack a kick and a hat on the same row.
 The **scale lock** is on by default (C minor pentatonic): every key you press is
 snapped into the scale, so you can't hit a wrong note. Press `F2` to cycle
 through other scales or switch it off for chromatic freedom.
+
+## Keyboard layouts (QWERTZ, AZERTY, ...)
+
+The piano keys follow the *physical position* of the keys, like a real tracker,
+so the layout of a piano on a German keyboard is the same as on a US one (Z is
+the key where the US `Z` sits, even though it types `Y`).
+
+* **kitty and Ghostty:** automatic. They report each key's US-position, and
+  OPL PAL asks for it on startup. Nothing to configure, any layout works.
+* **Other terminals:** no key positions available, so tell it your layout:
+  `./oplpal.py --layout de` (or `fr`; also `OPLPAL_LAYOUT=de` in your shell
+  profile). It prints a hint if your `LANG` is German or French.
+  On `fr` the key typing `,` is the B note, so use Shift+arrows for instruments.
+* The command keys that aren't piano keys (`Space`, arrows, `F`-keys, `Shift`+arrows)
+  are layout-proof; the optional punctuation shortcuts use whatever the key types.
+* `--no-kbd` turns off the position reporting if some terminal misbehaves.
+* Need another layout? Add a few lines to `LAYOUTS` in `oplpal.py`.
 
 ## Notes
 

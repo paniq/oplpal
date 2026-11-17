@@ -7,7 +7,7 @@ Run it, press Space, mash keys. Sound comes from the Nuked-OPL3 chip emulator
 and the rhythm-mode drum section. Graphics use the kitty graphics protocol
 (kitty, Ghostty, WezTerm...); in other terminals you just don't get the picture.
 
-    ./oplpal.py [song.json] [--no-gfx | --gfx] [--wav out.wav]
+    ./oplpal.py [song.json] [--no-gfx | --gfx] [--layout de|fr|us] [--wav out.wav]
 """
 import base64, collections, ctypes, fcntl, json, math, os, random, re, select
 import signal, struct, subprocess, sys, termios, threading, time, wave, zlib
@@ -469,32 +469,79 @@ DRUM_RGB = {"KCK": (255, 100, 90), "SNR": (255, 170, 70), "TOM": (240, 220, 90),
 INK, FAINT, ACCENT = (225, 228, 240), (88, 94, 120), (255, 205, 90)
 BG_ROW, BG_PLAY, BG_CUR = (22, 24, 36), (44, 50, 84), (240, 240, 250)
 
-KEYSEQ = {"\x1b[A": "up", "\x1b[B": "down", "\x1b[C": "right", "\x1b[D": "left",
-          "\x1b[5~": "pgup", "\x1b[6~": "pgdn", "\x1b[3~": "del", "\x1b[H": "home", "\x1b[F": "end",
-          "\x1b[1~": "home", "\x1b[4~": "end", "\x1b[Z": "btab",
-          "\x1bOP": "f1", "\x1bOQ": "f2", "\x1bOR": "f3", "\x1bOS": "f4", "\x1b[15~": "f5",
-          "\x1b[17~": "f6", "\x1b[18~": "f7", "\x1b[19~": "f8",
-          "\x1b[11~": "f1", "\x1b[12~": "f2", "\x1b[13~": "f3", "\x1b[14~": "f4"}
-CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1bO[P-S]")
-CTRL = {"\x11": "quit", "\x03": "quit", "\x13": "save", "\x05": "export", "\r": "enter", "\n": "enter",
-        "\t": "tab", "\x7f": "bs", "\x08": "bs", " ": "space"}
+# Keys arrive as (name, base). name is what the key *types* (used for commands);
+# base is the key's position on a US keyboard (used for the piano), so it works on any layout.
+FIN = {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end",
+       "P": "f1", "Q": "f2", "R": "f3", "S": "f4", "Z": "btab"}
+TIL = {1: "home", 3: "del", 4: "end", 5: "pgup", 6: "pgdn", 11: "f1", 12: "f2", 13: "f3", 14: "f4",
+       15: "f5", 17: "f6", 18: "f7", 19: "f8", 20: "f9", 21: "f10"}
+CSI = re.compile(r"\x1b\[([0-9:;?<=>]*)([ -/]*)([@-~])|\x1bO([P-S])")
+LEGACY = {"\x11": "quit", "\x03": "quit", "\x13": "save", "\x05": "export", "\r": "enter", "\n": "enter",
+          "\t": "tab", "\x7f": "bs", "\x08": "bs", " ": "space"}
+NAMED_U = {13: "enter", 9: "tab", 127: "bs", 8: "bs", 27: "esc", 32: "space"}
+# fallback for terminals without the kitty keyboard protocol: typed char -> US-position char
+LAYOUTS = {
+    "us": {},
+    "de": {"y": "z", "z": "y"},
+    "fr": {"a": "q", "q": "a", "z": "w", "w": "z", "m": ";", ",": "m", "&": "1", "é": "2", '"': "3",
+           "'": "4", "(": "5", "-": "6", "è": "7", "_": "8", "ç": "9", "à": "0"},
+}
 
 
-def tokens(data):
+def csi_u(field, mods):
+    p = field.split(":")
+    num = lambda i: int(p[i]) if i < len(p) and p[i].isdigit() else None
+    code, shifted, base = num(0), num(1), num(2)
+    if code is None or code >= 57344:             # modifier keys, keypad etc.
+        return "unk", None
+    if code == 9 and mods & 1:
+        return "btab", None
+    if code in NAMED_U:
+        return NAMED_U[code], None
+    if mods & 4:                                   # Ctrl+letter (Ctrl+Alt is AltGr: ignore)
+        if mods & 2:
+            return "unk", None
+        return {"q": "quit", "c": "quit", "s": "save", "e": "export"}.get(chr(code).lower(), "unk"), None
+    if mods & 10:                                  # Alt / Super
+        return "unk", None
+    ch = chr(shifted if (mods & 1 and shifted) else code)
+    return ch, chr(base if base else code).lower()
+
+
+def tokens(data, layout=None):
+    layout = layout or {}
     i, out = 0, []
     while i < len(data):
         ch = data[i]
-        if ch == "\x1b":
-            m = CSI.match(data, i)
-            if m:
-                out.append(KEYSEQ.get(m.group(), "unk"))
-                i = m.end()
-            else:
-                out.append("esc")
-                i += 1
-        else:
-            out.append(CTRL.get(ch, ch))
+        if ch != "\x1b":
+            low = ch.lower()
+            out.append((LEGACY[ch], None) if ch in LEGACY else (ch, layout.get(low, low)))
             i += 1
+            continue
+        m = CSI.match(data, i)
+        if not m:
+            out.append(("esc", None))
+            i += 1
+            continue
+        i = m.end()
+        if m.group(4):
+            out.append((FIN[m.group(4)], None))
+            continue
+        fields, final = m.group(1).split(";"), m.group(3)
+        mods = 0
+        if len(fields) > 1 and fields[1].split(":")[0].isdigit():
+            mods = (int(fields[1].split(":")[0]) - 1) & 15
+        if final == "u":
+            out.append(csi_u(fields[0], mods))
+            continue
+        if final == "~":
+            f0 = fields[0].split(":")[0]
+            name = TIL.get(int(f0)) if f0.isdigit() else None
+        else:
+            name = FIN.get(final)
+        if name in ("up", "down", "left", "right") and mods & 1:
+            name = "shift-" + name
+        out.append((name or "unk", None))
     return out
 
 
@@ -507,8 +554,9 @@ def term_size():
     return c, r, cw, ch
 
 
-def probe_gfx(fd):
-    sys.stdout.write("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c")
+def probe_term(fd):
+    """Ask the terminal what it can do: -> (kitty graphics?, kitty keyboard protocol?)"""
+    sys.stdout.write("\x1b[?u\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c")
     sys.stdout.flush()
     buf, end = "", time.time() + 0.5
     while time.time() < end:
@@ -516,7 +564,7 @@ def probe_gfx(fd):
             buf += os.read(fd, 256).decode("latin1")
             if re.search(r"\x1b\[\?[0-9;]*c", buf):
                 break
-    return "i=31;OK" in buf
+    return "i=31;OK" in buf, bool(re.search(r"\x1b\[\?\d+u", buf))
 
 
 # ───────────────────────────── the app ────────────────────────────────────
@@ -551,7 +599,8 @@ HELP = [
     f"{BOLD}DICE{RST}    F5 invents a part for the current track (bass/melody/beat)",
     f"{BOLD}EDIT{RST}    F6 clear track   F7 copy pattern to the next   F8 clear it",
     f"{BOLD}MOVE{RST}    arrows, Home/End, PgUp/PgDn = switch pattern",
-    f"{BOLD}SOUND{RST}   , . = instrument   [ ] = octave   - = tempo   Enter = mute",
+    f"{BOLD}SOUND{RST}   Shift+arrows: left/right = instrument, up/down = octave",
+    "         (also , . and [ ])   F9/F10 or - = : tempo   Enter = mute",
     f"{BOLD}FILE{RST}    Ctrl-S save   Ctrl-E export WAV   Ctrl-Q quit",
     "",
     f"{DIM} press any key to close help{RST}",
@@ -559,8 +608,9 @@ HELP = [
 
 
 class App:
-    def __init__(self, song, path, gfx):
+    def __init__(self, song, path, gfx, layout="us", use_kbd=True):
         self.song, self.path, self.gfx = song, path, gfx
+        self.layout, self.use_kbd, self.kbd = LAYOUTS[layout], use_kbd, False
         self.eng = Engine(song)
         self.audio = Audio(self.eng)
         self.cp = self.cr = self.ct = 0
@@ -582,6 +632,7 @@ class App:
     def term_on(self):
         self.fd = sys.stdin.fileno()
         self.old = termios.tcgetattr(self.fd)
+        self.lang_hint = getattr(self, "lang_hint", "")
         a = termios.tcgetattr(self.fd)
         a[0] &= ~(termios.IXON | termios.ICRNL | termios.INLCR)
         a[3] &= ~(termios.ECHO | termios.ICANON | termios.ISIG | termios.IEXTEN)
@@ -590,11 +641,18 @@ class App:
         sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J")
         sys.stdout.flush()
         signal.signal(signal.SIGWINCH, lambda *_: setattr(self, "resized", True))
+        gfx, kbd = probe_term(self.fd)
         if self.gfx is None:
-            self.gfx = probe_gfx(self.fd)
+            self.gfx = gfx
+        self.kbd = kbd and self.use_kbd
+        if not self.kbd and self.lang_hint:
+            self.say(f"Piano keys look wrong? This terminal can't report key positions - try: ./oplpal.py --layout {self.lang_hint}", 20)
+        if self.kbd:                       # 1+4+8: disambiguate, report layout-independent key, all keys
+            sys.stdout.write("\x1b[>13u")
+            sys.stdout.flush()
 
     def term_off(self):
-        sys.stdout.write("\x1b_Ga=d,d=A\x1b\\\x1b[?25h\x1b[?1049l\x1b[0m")
+        sys.stdout.write(("\x1b[<u" if self.kbd else "") + "\x1b_Ga=d,d=A\x1b\\\x1b[?25h\x1b[?1049l\x1b[0m")
         sys.stdout.flush()
         termios.tcsetattr(self.fd, termios.TCSAFLUSH, self.old)
 
@@ -689,7 +747,7 @@ class App:
         self.say("Exported " + out)
 
     # -- keys
-    def key(self, k):
+    def key(self, k, base=None):
         if k not in ("quit",):
             self.armed = False
         if self.help:
@@ -698,8 +756,9 @@ class App:
         s, e = self.song, self.eng
         if len(k) == 1 and k.isalpha():
             k = k.lower()
-        if k in PIANO:
-            return self.enter_note(PIANO[k])
+        pos = base or k                    # physical (US-layout) key, so the piano survives any layout
+        if len(pos) == 1 and pos in PIANO:
+            return self.enter_note(PIANO[pos])
         if k == "quit":
             if self.dirty and not self.armed:
                 self.armed = True
@@ -723,7 +782,7 @@ class App:
         elif k in ("del", "bs"):
             s.pats[self.cp][self.cr][self.ct] = (0, 0)
             self.dirty = True
-        elif k == "1":
+        elif pos == "1":
             if self.ct < NMEL:
                 s.pats[self.cp][self.cr][self.ct] = (-1, 0)
                 self.cr = (self.cr + self.step) % ROWS
@@ -731,14 +790,14 @@ class App:
         elif k == "enter":
             e.muted[self.ct] = not e.muted[self.ct]
             e.events.append(("mute", self.ct))
-        elif k in (",", "."):
-            self.inst = (self.inst + (1 if k == "." else -1)) % len(INSTRUMENTS)
+        elif k in (",", ".", "shift-left", "shift-right"):
+            self.inst = (self.inst + (1 if k in (".", "shift-right") else -1)) % len(INSTRUMENTS)
             if self.ct < NMEL:
                 e.events.append(("note", self.ct, self.snap(12 * (self.oct + 1)), self.inst))
-        elif k == "[": self.oct = max(1, self.oct - 1)
-        elif k == "]": self.oct = min(7, self.oct + 1)
-        elif k in ("-", "="):
-            s.bpm = max(60, min(240, s.bpm + (5 if k == "=" else -5)))
+        elif k in ("[", "shift-down"): self.oct = max(1, self.oct - 1)
+        elif k in ("]", "shift-up"): self.oct = min(7, self.oct + 1)
+        elif k in ("-", "=", "f9", "f10"):
+            s.bpm = max(60, min(240, s.bpm + (5 if k in ("=", "f10") else -5)))
         elif k in ("_", "+"):
             s.bpm = max(60, min(240, s.bpm + (1 if k == "+" else -1)))
         elif k == "f1" or k == "?": self.help = True
@@ -848,7 +907,7 @@ class App:
         k_ = lambda a: f"{fg(ACCENT)}{a}{RST}{fg(FAINT)}"
         L.append(f"{fg(FAINT)} {k_('Z..M')} {k_('Q..P')} notes  {k_('S D G H J')} sharps  {k_('arrows')} move  {k_('1')} note-off{RST}")
         L.append(f"{fg(FAINT)} {k_('Space')} play  {k_('Tab')} loop/song  {k_('PgUp/Dn')} pattern  {k_('Del')} clear  {k_('Enter')} mute{RST}")
-        L.append(f"{fg(FAINT)} {k_(', .')} instrument  {k_('[ ]')} octave  {k_('- =')} tempo  {k_('F5')} dice  {k_('F1')} help{RST}")
+        L.append(f"{fg(FAINT)} {k_('Shift+arrows')} instr/octave  {k_('F9 F10')} tempo  {k_('F5')} dice  {k_('F1')} help{RST}")
         if self.audio.error:
             L.append(f" {fg((255, 90, 90))}audio thread died: {self.audio.error}{RST}")
         elif not self.audio.sink.ok:
@@ -940,8 +999,8 @@ class App:
                 wait = max(0.0, nxt - time.monotonic())
                 if select.select([self.fd], [], [], wait)[0]:
                     data = os.read(self.fd, 4096).decode("utf-8", "ignore")
-                    for k in tokens(data):
-                        if self.key(k) == "quit":
+                    for k, base in tokens(data, self.layout):
+                        if self.key(k, base) == "quit":
                             return
                 if time.monotonic() >= nxt:
                     self.draw()
@@ -956,12 +1015,15 @@ def main():
     gfx = None
     wav = None
     path = "oplpal-song.json"
+    layout, use_kbd = os.environ.get("OPLPAL_LAYOUT", "us"), True
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--no-gfx": gfx = False
         elif a == "--gfx": gfx = True
         elif a == "--wav": wav = args[i + 1]; i += 1
+        elif a == "--layout": layout = args[i + 1]; i += 1
+        elif a == "--no-kbd": use_kbd = False
         elif a in ("-h", "--help"): print(__doc__); return
         else: path = a
         i += 1
@@ -975,8 +1037,13 @@ def main():
         return
     if not sys.stdin.isatty():
         sys.exit("OPL PAL needs a real terminal.")
+    if layout not in LAYOUTS:
+        sys.exit(f"Unknown layout {layout!r}; choose from: {', '.join(LAYOUTS)}")
     random.seed()
-    App(song, path, gfx).run()
+    app = App(song, path, gfx, layout, use_kbd)
+    lang = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "")[:2]
+    app.lang_hint = lang if lang in ("de", "fr") and layout == "us" else ""
+    app.run()
 
 
 if __name__ == "__main__":
